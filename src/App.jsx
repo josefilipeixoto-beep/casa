@@ -314,7 +314,14 @@ export default function ContasCasa() {
                         }}
                       />
                     </div>
-                    {over && <span style={styles.overLabel}>Passou {euros(s - t)} do alvo</span>}
+                    {over ? (
+                      <span style={styles.overLabel}>Passou {euros(s - t)} do alvo</span>
+                    ) : (
+                      <div style={styles.remainingRow}>
+                        <span style={styles.remainingLabel}>Ainda tens</span>
+                        <span style={{ ...styles.remainingValue, color: c.color }}>{euros(t - s)}</span>
+                      </div>
+                    )}
                     <span style={styles.summaryHint}>Ver despesas →</span>
                   </button>
                 );
@@ -566,6 +573,23 @@ export default function ContasCasa() {
               <span>Gasto: <strong>{euros(spent[viewCategory])}</strong></span>
               <span style={{ color: "#948A72" }}>Alvo: {euros(targets[viewCategory])}</span>
             </div>
+            <div style={styles.catModalRemaining}>
+              {spent[viewCategory] > targets[viewCategory] ? (
+                <>
+                  <span style={styles.remainingLabel}>Passou do alvo</span>
+                  <span style={{ ...styles.remainingValue, color: STAMP_RED, fontSize: 18 }}>
+                    {euros(spent[viewCategory] - targets[viewCategory])}
+                  </span>
+                </>
+              ) : (
+                <>
+                  <span style={styles.remainingLabel}>Ainda tens para gastar</span>
+                  <span style={{ ...styles.remainingValue, color: CATS[viewCategory].color, fontSize: 18 }}>
+                    {euros(targets[viewCategory] - spent[viewCategory])}
+                  </span>
+                </>
+              )}
+            </div>
 
             {expenses.filter((e) => e.category === viewCategory).length === 0 ? (
               <p style={styles.emptyText}>Ainda não há despesas nesta categoria este mês.</p>
@@ -784,6 +808,26 @@ const styles = {
   barTrack: { height: 6, background: "#DDD3BB", borderRadius: 4, overflow: "hidden" },
   barFill: { height: "100%", borderRadius: 4, transition: "width 0.3s ease" },
   overLabel: { display: "block", marginTop: 6, fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, color: STAMP_RED },
+  remainingRow: {
+    display: "flex",
+    alignItems: "baseline",
+    justifyContent: "space-between",
+    marginTop: 7,
+    paddingTop: 6,
+    borderTop: `1px dashed ${RULE}`,
+  },
+  remainingLabel: {
+    fontFamily: "'IBM Plex Mono', monospace",
+    fontSize: 10,
+    textTransform: "uppercase",
+    letterSpacing: "0.05em",
+    color: "#6B6250",
+  },
+  remainingValue: {
+    fontFamily: "'IBM Plex Mono', monospace",
+    fontWeight: 600,
+    fontSize: 15,
+  },
   summaryHint: {
     display: "block",
     marginTop: 8,
@@ -1017,6 +1061,16 @@ const styles = {
 
   catModalHeader: { display: "flex", alignItems: "center", gap: 8, marginBottom: 4 },
   catModalTotals: { display: "flex", justifyContent: "space-between", fontSize: 13.5, marginBottom: 14, paddingBottom: 10, borderBottom: `1px dashed ${RULE}` },
+  catModalRemaining: {
+    display: "flex",
+    alignItems: "baseline",
+    justifyContent: "space-between",
+    background: "#fff",
+    border: `1px solid ${RULE}`,
+    borderRadius: 10,
+    padding: "10px 12px",
+    marginBottom: 14,
+  },
   catModalList: { listStyle: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 6, maxHeight: 320, overflowY: "auto" },
   catModalItem: { display: "flex", alignItems: "center", gap: 8, background: "#fff", border: `1px solid ${RULE}`, borderRadius: 8, padding: "8px 10px" },
   catModalDesc: { flex: 1, fontSize: 13.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
