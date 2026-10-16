@@ -54,6 +54,67 @@ function guessCategory(desc, keywords) {
   return null;
 }
 
+// Gavetas dentro de cada cartão. Calculadas a partir da descrição (nada é
+// guardado na base de dados), por isso valem também para despesas antigas.
+// Despesas que não encaixam em nenhuma gaveta ficam só no total do cartão.
+const SUBCATS = {
+  necessidades: [
+    { id: "supermercado", label: "Supermercado", kw: ["lidl", "mercadona", "continente", "pingo doce", "supermercado", "minipreco", "intermarche", "aldi", "auchan", "mercearia", "talho", "padaria"] },
+    { id: "combustivel", label: "Combustível", kw: ["combustivel", "gasolina", "gasoleo", "diesel", "gota", "bomba", "galp", "repsol", "cepsa", "prio"] },
+    { id: "casa", label: "Casa e contas", kw: ["seguro", "renda", "prestacao", "credito", "emprestimo", "agua", "luz", "eletricidade", "edp", "gas", "internet", "telemovel", "telefone", "condominio", "casa", "imi"] },
+    { id: "saude", label: "Saúde", kw: ["farmacia", "saude", "medico", "consulta", "dentista", "medicamento", "analises", "hospital", "clinica", "optica"] },
+  ],
+  desejos: [
+    { id: "compras", label: "Compras", kw: ["roupa", "sapatos", "calcado", "jysk", "homa", "ikea", "shopping", "perfume", "compras", "amazon", "worten", "fnac", "zara", "decathlon"] },
+    { id: "restaurantes", label: "Restaurantes e cafés", kw: ["restaurante", "cafe", "jantar", "almoco", "pizza", "hamburguer", "mcdonalds", "pastelaria", "tasca", "bar", "gelado"] },
+    { id: "prendas", label: "Prendas", kw: ["prenda", "presente"] },
+    { id: "lazer", label: "Lazer", kw: ["cinema", "ginasio", "viagem", "netflix", "spotify", "jogo", "steam", "playstation", "concerto", "bilhete", "hotel", "ferias", "passeio"] },
+  ],
+  poupanca: [],
+};
+
+// Palavra inteira (ou início de palavra, nas palavras com 5+ letras), para
+// "prenda" não ser confundida com "renda".
+function matchesWord(normalizedText, kw) {
+  const k = normalize(kw);
+  const words = normalizedText.split(/[^a-z0-9]+/).filter(Boolean);
+  if (k.includes(" ")) return normalizedText.includes(k);
+  return words.some((w) => w === k || (k.length >= 5 && w.startsWith(k)));
+}
+
+function guessSub(desc, category, learned) {
+  const subs = SUBCATS[category] || [];
+  const n = normalize(desc);
+  // palavras que a app aprendeu contigo vêm primeiro
+  const lc = (learned && learned[category]) || {};
+  for (const sub of subs) {
+    if ((lc[sub.id] || []).some((kw) => matchesWord(n, kw))) return sub.id;
+  }
+  for (const sub of subs) {
+    if (sub.kw.some((kw) => matchesWord(n, kw))) return sub.id;
+  }
+  return null;
+}
+
+// Gaveta efetiva de uma despesa: a que escolheste à mão (e.sub) ou a que a app adivinha
+function effectiveSub(e, learned) {
+  if (e.sub !== undefined) return e.sub || null; // "" = sem gaveta, de propósito
+  return guessSub(e.desc, e.category, learned);
+}
+
+// Total por gaveta de uma lista de despesas, para uma categoria
+function subTotals(expenseList, category, learned) {
+  const subs = SUBCATS[category] || [];
+  const totals = {};
+  subs.forEach((sb) => { totals[sb.id] = 0; });
+  for (const e of expenseList) {
+    if (e.category !== category) continue;
+    const id = effectiveSub(e, learned);
+    if (id && id in totals) totals[id] += Number(e.amount || 0);
+  }
+  return subs.map((sb) => ({ ...sb, total: totals[sb.id] }));
+}
+
 function monthLabel(d = new Date()) {
   const meses = [
     "Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho",
@@ -92,6 +153,16 @@ export default function ContasCasa() {
   const [savingNote, setSavingNote] = useState("");
   const [printData, setPrintData] = useState(null);
   const [viewCategory, setViewCategory] = useState(null);
+  const [subKeywords, setSubKeywords] = useState({}); // palavras aprendidas para as gavetas
+  const [pickSubFor, setPickSubFor] = useState(null); // id da despesa a escolher gaveta
+
+  // entradas extra (não entram nos alvos 50/30/20)
+  const [extras, setExtras] = useState([]);
+  const [showExtraModal, setShowExtraModal] = useState(false);
+  const [exDesc, setExDesc] = useState("");
+  const [exAmount, setExAmount] = useState("");
+  const [exSave, setExSave] = useState("");
+  const [exError, setExError] = useState("");
 
   // ---- print / PDF ----
   useEffect(() => {
@@ -117,11 +188,15 @@ export default function ContasCasa() {
         if (s) {
           if (s.income != null) setIncome(s.income);
           if (s.keywords) setKeywords(s.keywords);
+          if (s.subKeywords) setSubKeywords(s.subKeywords);
         }
       } catch (e) {}
       try {
         const cm = await loadKV("current-month");
-        if (cm) setExpenses(cm.expenses || []);
+        if (cm) {
+          setExpenses(cm.expenses || []);
+          setExtras(cm.extras || []);
+        }
       } catch (e) {}
       try {
         const h = await loadKV("history");
@@ -131,17 +206,17 @@ export default function ContasCasa() {
     })();
   }, []);
 
-  const persistSettings = useCallback(async (nextIncome, nextKeywords) => {
+  const persistSettings = useCallback(async (nextIncome, nextKeywords, nextSubKeywords) => {
     try {
-      await saveKV("settings", { income: nextIncome, keywords: nextKeywords });
+      await saveKV("settings", { income: nextIncome, keywords: nextKeywords, subKeywords: nextSubKeywords || {} });
     } catch (e) {
       setError("Não consegui guardar as definições. Tenta novamente.");
     }
   }, []);
 
-  const persistExpenses = useCallback(async (list) => {
+  const persistExpenses = useCallback(async (list, extraList) => {
     try {
-      await saveKV("current-month", { expenses: list });
+      await saveKV("current-month", { expenses: list, extras: extraList || [] });
     } catch (e) {
       setError("Não consegui guardar a despesa. Tenta novamente.");
     }
@@ -207,11 +282,11 @@ export default function ContasCasa() {
       if (firstWord && firstWord.length > 2 && guessCategory(desc, keywords) !== pendingCat) {
         const nextKw = { ...keywords, [pendingCat]: [...keywords[pendingCat], firstWord] };
         setKeywords(nextKw);
-        persistSettings(income, nextKw);
+        persistSettings(income, nextKw, subKeywords);
       }
     }
     resetForm();
-    await persistExpenses(next);
+    await persistExpenses(next, extras);
     setSavingNote("Guardado");
     setTimeout(() => setSavingNote(""), 1200);
   }
@@ -219,13 +294,13 @@ export default function ContasCasa() {
   async function removeExpense(id) {
     const next = expenses.filter((e) => e.id !== id);
     setExpenses(next);
-    await persistExpenses(next);
+    await persistExpenses(next, extras);
   }
 
   async function updateIncome(v) {
     const val = parseFloat(String(v).replace(",", ".")) || 0;
     setIncome(val);
-    await persistSettings(val, keywords);
+    await persistSettings(val, keywords, subKeywords);
   }
 
   async function closeMonth() {
@@ -237,16 +312,93 @@ export default function ContasCasa() {
       totals: { ...spent },
       targets: { ...targets },
       expenses,
+      extras,
     };
     const nextHistory = [closed, ...history];
     setHistory(nextHistory);
     setExpenses([]);
+    setExtras([]);
     await persistHistory(nextHistory);
-    await persistExpenses([]);
+    await persistExpenses([], []);
     setShowCloseModal(false);
   }
 
   const totalSpent = spent.necessidades + spent.desejos + spent.poupanca;
+
+  const extraTotals = useMemo(() => {
+    let total = 0;
+    let toSavings = 0;
+    for (const x of extras) {
+      total += Number(x.amount || 0);
+      toSavings += Number(x.toSavings || 0);
+    }
+    return { total, toSavings, rest: total - toSavings };
+  }, [extras]);
+
+  async function assignSub(expenseId, subId) {
+    const target = expenses.find((e) => e.id === expenseId);
+    if (!target) return;
+    const next = expenses.map((e) => (e.id === expenseId ? { ...e, sub: subId } : e));
+    setExpenses(next);
+    setPickSubFor(null);
+    await persistExpenses(next, extras);
+
+    // aprender: da próxima vez, esta palavra já vai para a mesma gaveta
+    if (subId) {
+      const firstWord = normalize(target.desc.trim()).split(" ")[0];
+      if (firstWord && firstWord.length > 2 && guessSub(target.desc, target.category, subKeywords) !== subId) {
+        const catMap = subKeywords[target.category] || {};
+        const nextSub = {
+          ...subKeywords,
+          [target.category]: { ...catMap, [subId]: [...(catMap[subId] || []), firstWord] },
+        };
+        setSubKeywords(nextSub);
+        persistSettings(income, keywords, nextSub);
+      }
+    }
+  }
+
+  function openExtraModal() {
+    setExDesc("");
+    setExAmount("");
+    setExSave("");
+    setExError("");
+    setShowExtraModal(true);
+  }
+
+  async function addExtra() {
+    const value = parseFloat(String(exAmount).replace(",", "."));
+    const part = exSave.trim() === "" ? 0 : parseFloat(String(exSave).replace(",", "."));
+    if (!value || value <= 0) {
+      setExError("Põe um valor válido para a entrada.");
+      return;
+    }
+    if (isNaN(part) || part < 0) {
+      setExError("O valor para a poupança não é válido.");
+      return;
+    }
+    if (part > value) {
+      setExError("Para a poupança não pode ser mais do que a entrada.");
+      return;
+    }
+    const entry = {
+      id: uid(),
+      day: new Date().getDate(),
+      desc: exDesc.trim() || "Entrada extra",
+      amount: value,
+      toSavings: part,
+    };
+    const next = [entry, ...extras];
+    setExtras(next);
+    setShowExtraModal(false);
+    await persistExpenses(expenses, next);
+  }
+
+  async function removeExtra(id) {
+    const next = extras.filter((x) => x.id !== id);
+    setExtras(next);
+    await persistExpenses(expenses, next);
+  }
 
   return (
     <div style={styles.page}>
@@ -449,6 +601,59 @@ export default function ContasCasa() {
               )}
             </section>
 
+            <section style={styles.listCard}>
+              <div style={styles.listHeader}>
+                <h2 style={styles.sectionTitle}>Entradas extra</h2>
+                <button type="button" style={styles.extraBtn} onClick={openExtraModal}>
+                  <Plus size={15} strokeWidth={2.5} />
+                  Entrada extra
+                </button>
+              </div>
+              <p style={styles.extraHint}>Não mexem nos alvos 50/30/20.</p>
+              {extras.length === 0 ? (
+                <p style={styles.emptyText}>Sem entradas extra este mês.</p>
+              ) : (
+                <>
+                  <div style={styles.extraSummary}>
+                    <div style={styles.subRow}>
+                      <span style={styles.subLabel}>Entrou</span>
+                      <span style={styles.subValue}>{euros(extraTotals.total)}</span>
+                    </div>
+                    <div style={styles.subRow}>
+                      <span style={styles.subLabel}>Foi para a poupança</span>
+                      <span style={{ ...styles.subValue, color: CATS.poupanca.color }}>{euros(extraTotals.toSavings)}</span>
+                    </div>
+                    <div style={styles.subRow}>
+                      <span style={styles.subLabel}>Ficou contigo</span>
+                      <span style={styles.subValue}>{euros(extraTotals.rest)}</span>
+                    </div>
+                  </div>
+                  <ul style={styles.catModalList}>
+                    {extras.map((x) => (
+                      <li key={x.id} style={styles.catModalItem}>
+                        <span style={styles.itemDay}>{String(x.day).padStart(2, "0")}</span>
+                        <span style={styles.catModalDesc}>
+                          {x.desc}
+                          {x.toSavings > 0 && (
+                            <span style={styles.extraRowSub}> · {euros(x.toSavings)} p/ poupança</span>
+                          )}
+                        </span>
+                        <span style={styles.itemAmount}>{euros(x.amount)}</span>
+                        <button
+                          type="button"
+                          onClick={() => removeExtra(x.id)}
+                          style={styles.deleteBtn}
+                          aria-label="Remover entrada extra"
+                        >
+                          <Trash2 size={15} />
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              )}
+            </section>
+
             <button type="button" style={styles.closeMonthBtn} onClick={() => setShowCloseModal(true)}>
               <Lock size={16} />
               Fechar mês e arquivar
@@ -507,6 +712,33 @@ export default function ContasCasa() {
                                 </div>
                               ))}
                             </div>
+                            {Object.keys(SUBCATS).filter((k) => SUBCATS[k].length > 0).map((k) => (
+                              <div key={k} style={styles.historySubBlock}>
+                                <span style={styles.historySubTitle}>{CATS[k].label}</span>
+                                {subTotals(h.expenses, k, subKeywords).map((sb) => (
+                                  <div key={sb.id} style={styles.subRow}>
+                                    <span style={{ ...styles.subLabel, color: sb.total > 0 ? INK : "#948A72" }}>{sb.label}</span>
+                                    <span style={{ ...styles.subValue, color: sb.total > 0 ? INK : "#948A72" }}>{euros(sb.total)}</span>
+                                  </div>
+                                ))}
+                              </div>
+                            ))}
+                            {h.extras && h.extras.length > 0 && (
+                              <div style={styles.historySubBlock}>
+                                <span style={styles.historySubTitle}>Entradas extra</span>
+                                {h.extras.map((x) => (
+                                  <div key={x.id} style={styles.subRow}>
+                                    <span style={styles.subLabel}>
+                                      {x.desc}
+                                      {x.toSavings > 0 && (
+                                        <span style={styles.extraRowSub}> · {euros(x.toSavings)} p/ poupança</span>
+                                      )}
+                                    </span>
+                                    <span style={styles.subValue}>{euros(x.amount)}</span>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
                             <ul style={styles.historyExpenseList}>
                               {h.expenses.map((e) => (
                                 <li key={e.id} style={styles.historyExpenseItem}>
@@ -559,6 +791,55 @@ export default function ContasCasa() {
         </div>
       )}
 
+      {showExtraModal && (
+        <div style={styles.modalOverlay} onClick={() => setShowExtraModal(false)}>
+          <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
+            <button style={styles.modalClose} onClick={() => setShowExtraModal(false)} aria-label="Fechar">
+              <X size={18} />
+            </button>
+            <h3 style={styles.modalTitle}>Entrada extra</h3>
+            <p style={styles.modalText}>Não altera os alvos 50/30/20.</p>
+            <div style={styles.fieldGroup}>
+              <label style={styles.fieldLabel}>Descrição (opcional)</label>
+              <input
+                type="text"
+                placeholder="Ex: subsídio, horas extra…"
+                value={exDesc}
+                onChange={(e) => setExDesc(e.target.value)}
+                style={styles.descInput}
+              />
+            </div>
+            <div style={{ ...styles.fieldGroup, marginTop: 10 }}>
+              <label style={styles.fieldLabel}>Quanto entrou (€)</label>
+              <input
+                type="text"
+                inputMode="decimal"
+                placeholder="0,00"
+                value={exAmount}
+                onChange={(e) => setExAmount(e.target.value)}
+                style={styles.descInput}
+              />
+            </div>
+            <div style={{ ...styles.fieldGroup, marginTop: 10 }}>
+              <label style={styles.fieldLabel}>Quanto vai para a poupança (€)</label>
+              <input
+                type="text"
+                inputMode="decimal"
+                placeholder="0,00"
+                value={exSave}
+                onChange={(e) => setExSave(e.target.value)}
+                style={styles.descInput}
+              />
+            </div>
+            {exError && <p style={styles.errorText}>{exError}</p>}
+            <button type="button" style={{ ...styles.modalConfirm, marginTop: 14 }} onClick={addExtra}>
+              <Check size={17} />
+              Guardar entrada
+            </button>
+          </div>
+        </div>
+      )}
+
       {viewCategory && (
         <div style={styles.modalOverlay} onClick={() => setViewCategory(null)}>
           <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
@@ -591,17 +872,50 @@ export default function ContasCasa() {
               )}
             </div>
 
+            {(SUBCATS[viewCategory] || []).length > 0 && (
+              <div style={styles.subBlock}>
+                <span style={styles.subBlockTitle}>Por gaveta</span>
+                {subTotals(expenses, viewCategory, subKeywords).map((sb) => (
+                  <div key={sb.id} style={styles.subRow}>
+                    <span style={{ ...styles.subLabel, color: sb.total > 0 ? INK : "#948A72" }}>{sb.label}</span>
+                    <span style={{ ...styles.subValue, color: sb.total > 0 ? INK : "#948A72" }}>{euros(sb.total)}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+
             {expenses.filter((e) => e.category === viewCategory).length === 0 ? (
               <p style={styles.emptyText}>Ainda não há despesas nesta categoria este mês.</p>
             ) : (
+              <>
+              {(SUBCATS[viewCategory] || []).length > 0 && (
+                <p style={styles.extraHint}>Toca na etiqueta de cada despesa para escolher a gaveta.</p>
+              )}
               <ul style={styles.catModalList}>
                 {expenses
                   .filter((e) => e.category === viewCategory)
                   .sort((a, b) => a.day - b.day)
                   .map((e) => (
-                    <li key={e.id} style={styles.catModalItem}>
+                    <li key={e.id} style={{ ...styles.catModalItem, flexWrap: "wrap" }}>
                       <span style={styles.itemDay}>{String(e.day).padStart(2, "0")}</span>
-                      <span style={styles.catModalDesc}>{e.desc}</span>
+                      <div style={styles.catModalDescWrap}>
+                        <span style={styles.catModalDesc}>{e.desc}</span>
+                        {(SUBCATS[viewCategory] || []).length > 0 && (() => {
+                          const cur = effectiveSub(e, subKeywords);
+                          const curLabel = cur ? (SUBCATS[viewCategory].find((sb) => sb.id === cur) || {}).label : null;
+                          return (
+                            <button
+                              type="button"
+                              onClick={() => setPickSubFor(pickSubFor === e.id ? null : e.id)}
+                              style={curLabel
+                                ? { ...styles.subPill, color: CATS[viewCategory].color, borderColor: CATS[viewCategory].color }
+                                : styles.subPillEmpty}
+                            >
+                              {curLabel || "+ gaveta"}
+                            </button>
+                          );
+                        })()}
+                      </div>
                       <span style={styles.itemAmount}>{euros(e.amount)}</span>
                       <button
                         type="button"
@@ -611,9 +925,39 @@ export default function ContasCasa() {
                       >
                         <Trash2 size={15} />
                       </button>
+                      {pickSubFor === e.id && (
+                        <div style={styles.subChipRow}>
+                          {(SUBCATS[viewCategory] || []).map((sb) => {
+                            const active = effectiveSub(e, subKeywords) === sb.id;
+                            return (
+                              <button
+                                key={sb.id}
+                                type="button"
+                                onClick={() => assignSub(e.id, sb.id)}
+                                style={{
+                                  ...styles.subChip,
+                                  borderColor: CATS[viewCategory].color,
+                                  background: active ? CATS[viewCategory].color : "transparent",
+                                  color: active ? "#FBF8F1" : CATS[viewCategory].color,
+                                }}
+                              >
+                                {sb.label}
+                              </button>
+                            );
+                          })}
+                          <button
+                            type="button"
+                            onClick={() => assignSub(e.id, "")}
+                            style={{ ...styles.subChip, borderColor: "#948A72", color: "#6B6250" }}
+                          >
+                            Sem gaveta
+                          </button>
+                        </div>
+                      )}
                     </li>
                   ))}
               </ul>
+              </>
             )}
           </div>
         </div>
@@ -649,6 +993,48 @@ export default function ContasCasa() {
               })}
             </tbody>
           </table>
+
+          <table className="print-summary-table">
+            <thead>
+              <tr>
+                <th>Gaveta</th>
+                <th>Categoria</th>
+                <th>Gasto</th>
+              </tr>
+            </thead>
+            <tbody>
+              {Object.keys(SUBCATS).filter((k) => SUBCATS[k].length > 0).flatMap((k) =>
+                subTotals(printData.expenses, k, subKeywords).map((sb) => (
+                  <tr key={k + sb.id}>
+                    <td>{sb.label}</td>
+                    <td>{CATS[k].label}</td>
+                    <td>{euros(sb.total)}</td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+
+          {printData.extras && printData.extras.length > 0 && (
+            <table className="print-summary-table">
+              <thead>
+                <tr>
+                  <th>Entrada extra</th>
+                  <th>Valor</th>
+                  <th>Para a poupança</th>
+                </tr>
+              </thead>
+              <tbody>
+                {printData.extras.map((x) => (
+                  <tr key={x.id}>
+                    <td>{x.desc}</td>
+                    <td>{euros(x.amount)}</td>
+                    <td>{euros(x.toSavings || 0)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
 
           <table className="print-expense-table">
             <thead>
@@ -1070,6 +1456,122 @@ const styles = {
     borderRadius: 10,
     padding: "10px 12px",
     marginBottom: 14,
+  },
+  subBlock: {
+    background: "#fff",
+    border: `1px solid ${RULE}`,
+    borderRadius: 10,
+    padding: "10px 12px",
+    marginBottom: 14,
+  },
+  subBlockTitle: {
+    display: "block",
+    fontFamily: "'IBM Plex Mono', monospace",
+    fontSize: 10,
+    textTransform: "uppercase",
+    letterSpacing: "0.05em",
+    color: "#6B6250",
+    marginBottom: 6,
+  },
+  subRow: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "baseline",
+    padding: "3px 0",
+    fontSize: 13.5,
+  },
+  subLabel: { fontSize: 13.5 },
+  subValue: {
+    fontFamily: "'IBM Plex Mono', monospace",
+    fontWeight: 600,
+    fontSize: 13,
+  },
+  historySubBlock: {
+    borderTop: `1px dashed ${RULE}`,
+    padding: "8px 0 4px",
+  },
+  historySubTitle: {
+    display: "block",
+    fontFamily: "'IBM Plex Mono', monospace",
+    fontSize: 10,
+    textTransform: "uppercase",
+    letterSpacing: "0.05em",
+    color: "#6B6250",
+    marginBottom: 4,
+  },
+  extraBtn: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 4,
+    background: "transparent",
+    border: `1.5px solid ${CATS.poupanca.color}`,
+    color: CATS.poupanca.color,
+    borderRadius: 999,
+    padding: "5px 12px",
+    fontFamily: "'Inter', sans-serif",
+    fontWeight: 600,
+    fontSize: 13,
+    cursor: "pointer",
+  },
+  extraHint: {
+    margin: "-4px 0 10px",
+    fontSize: 12,
+    color: "#948A72",
+  },
+  extraSummary: {
+    background: "#fff",
+    border: `1px solid ${RULE}`,
+    borderRadius: 10,
+    padding: "8px 12px",
+    marginBottom: 12,
+  },
+  extraRowSub: {
+    fontSize: 11.5,
+    color: "#948A72",
+  },
+  catModalDescWrap: {
+    flex: 1,
+    minWidth: 0,
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "flex-start",
+    gap: 3,
+  },
+  subPill: {
+    background: "transparent",
+    border: "1px solid",
+    borderRadius: 999,
+    padding: "1px 8px",
+    fontFamily: "'IBM Plex Mono', monospace",
+    fontSize: 10.5,
+    cursor: "pointer",
+  },
+  subPillEmpty: {
+    background: "transparent",
+    border: "1px dashed #948A72",
+    borderRadius: 999,
+    padding: "1px 8px",
+    fontFamily: "'IBM Plex Mono', monospace",
+    fontSize: 10.5,
+    color: "#948A72",
+    cursor: "pointer",
+  },
+  subChipRow: {
+    flexBasis: "100%",
+    display: "flex",
+    flexWrap: "wrap",
+    gap: 6,
+    paddingTop: 6,
+  },
+  subChip: {
+    background: "transparent",
+    border: "1.5px solid",
+    borderRadius: 999,
+    padding: "4px 10px",
+    fontFamily: "'Inter', sans-serif",
+    fontWeight: 600,
+    fontSize: 12,
+    cursor: "pointer",
   },
   catModalList: { listStyle: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 6, maxHeight: 320, overflowY: "auto" },
   catModalItem: { display: "flex", alignItems: "center", gap: 8, background: "#fff", border: `1px solid ${RULE}`, borderRadius: 8, padding: "8px 10px" },
